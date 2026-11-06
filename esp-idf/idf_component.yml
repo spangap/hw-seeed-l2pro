@@ -1,0 +1,14 @@
+description: "hw-seeed-l2pro: Seeed Wio Tracker L2 Pro board HAL for reticulous (I2C bus, IO expander, rails, battery ADC, backlight, keys, audio codecs; panel/touch/radio/GNSS/I2S via the generic straddles' Kconfig)."
+url: https://github.com/spangap/hw-seeed-l2pro
+version: "0.1.0"
+license: "Apache-2.0"
+targets:
+  - esp32s3
+dependencies:
+  idf:
+    version: ">=5.5"
+  # ES8311 / ES7243E register sequences, used by conditional/audio/ only. The
+  # component manager cannot gate on what is staged; in an image without audio
+  # nothing references it and it is not linked.
+  espressif/esp_codec_dev:
+    version: "^1.5"

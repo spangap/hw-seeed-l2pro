@@ -1,0 +1,178 @@
+# hw-seeed-l2pro — board HAL straddle for the Seeed Wio Tracker L2 Pro.
+#
+# A plain (non-buildable) board component: it doesn't decide what the device
+# DOES, it only makes the board usable by an app. The reticulous/reticulous
+# buildable adds it with `--with spangap/hw-seeed-l2pro` and inherits the
+# board's pin maps, bring-up hooks and hardware kconfig.
+#
+# The L2 Pro is a handheld built on Seeed's Wio-S3 module (ESP32-S3R8: 16 MB
+# flash, 8 MB octal PSRAM; an SX1262 on the module's own SPI bus) behind a 3.2"
+# 320x240 IPS panel — an NV3031B on quad SPI with GT911 touch and an LP5814 LED
+# driver for its backlight — plus a Quectel L76K GNSS receiver, an ES8311
+# speaker DAC and an ES7243E mic ADC on one I2S bus, microSD on SDMMC, an
+# ADS1115 for the battery, and a TCA9535-class IO expander that switches nearly
+# every rail and reset on the board. Board reference:
+# https://wiki.seeedstudio.com/meshtastic_wio_tracker_l2_intro/
+schema_version: 1
+name: spangap/hw-seeed-l2pro
+prefix: l2pro
+firmware: esp-idf
+version: 0.0.0
+platforms: [idf]
+# What this board pulls in: the on-device LCD UI, because it physically has a
+# (touch) screen — drop it with --no-lcd — the GNSS straddle for the built-in
+# L76K, the audio engine for its speaker and mic, and the LoRa interface for the
+# SX1262 whose pins are in kconfig: below. There is no hardware keyboard: the
+# board never calls lcdSetHasKeyboard(), so spangap-lcd's on-screen keyboard
+# stays active for text input.
+additional_installs:
+  - spangap/spangap-lcd
+  - spangap/gps
+  - spangap/audio
+  # Gated on rns, because it is a Reticulum interface: a buildable that is not a
+  # Reticulum node must not inherit the mesh from the board's modem.
+  - { install: reticulous/iface-lora, when: reticulous/rns }
+# Board bring-up as registered Services, constructed in listed order (onStart
+# before spangapInit, onInit after).
+#   L2proBoard.onStart — the board I2C bus and the IO expander: every rail and
+#     reset it holds, before spangapInit()'s fs_mount_sd() and before
+#     spangap-lcd brings up the panel and touch. onInit publishes sys.board.
+#   L2proLcdInput (conditional/spangap-lcd/, when spangap-lcd): onStart brings
+#     up the LP5814 and hands it to spangap-lcd as the backlight, and registers
+#     the input HAL (Home button, side key) before lcdInit.
+#   L2proAudio (conditional/audio/, when spangap/audio): onInit registers the
+#     ES8311 / ES7243E control plane with the audio engine.
+#   L2proBattery.onInit — the ADS1115, once a minute, publishing
+#     battery.millivolt / battery.percent.
+# The GNSS supply is not a Service: conditional/gps/ defines gps's weak
+# gpsBoardPower() hook, since the rail is an expander line.
+services:
+  - { class: L2proBoard,    header: l2pro.h }
+  - { class: L2proLcdInput, header: l2pro_lcd.h,   when: spangap/spangap-lcd }
+  - { class: L2proAudio,    header: l2pro_audio.h, when: spangap/audio }
+  - { class: L2proBattery,  header: l2pro.h }
+
+# The board's rows on the System page. There is no wake-on-touch switch: the
+# GT911's INT is an expander line, so touch is polled and cannot wake the chip.
+settings:
+  - at: [ { id: system } ]
+    order: 10
+    rows:
+      - section: "Hardware"
+      - info:
+          rows:
+            - value:  { label: "Board", key: "sys.board" }
+            - value:  { label: "Touch", key: "lcd.touch" }
+  - at: [ { id: system } ]
+    order: 20
+    rows:
+      - section: "Display"
+      - slider: { label: "Backlight",      key: "s.lcd.backlight",          min: 0, max: 255 }
+      - integer: { label: "Dim after", unit: "s",  key: "s.lcd.inactivity_timeout", min: 0, max: 120 }
+      - caption: "The side key or the U/B key wakes the screen."
+
+# Board VALUES, fed to the symbols other straddles / IDF DEFINE. A board
+# straddle is non-buildable, so its sdkconfig.defaults would be IGNORED —
+# everything that describes this hardware MUST live here in kconfig:.
+kconfig:
+  # Board memory: the Wio-S3's ESP32-S3R8 — 16 MB flash, 8 MB octal PSRAM.
+  # MAX_FIRMWARE_KB is where /state begins; /state fills the rest (~8 MB), the
+  # same split as the other 16 MB screen boards. Changing it relocates /state →
+  # existing devices factory-reset on the next boot.
+  - CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+  - CONFIG_SPANGAP_MAX_FIRMWARE_KB=8192
+  - CONFIG_SPIRAM_MODE_OCT=y
+  # microSD on SDMMC, 1-bit. Its rail is an expander line, raised by
+  # L2proBoard::onStart before the mount.
+  - CONFIG_SPANGAP_SDCARD=y
+  - CONFIG_SPANGAP_SDCARD_BUS_SDMMC=y
+  - CONFIG_SPANGAP_SDCARD_PIN_CLK=2
+  - CONFIG_SPANGAP_SDCARD_PIN_CMD=3
+  - CONFIG_SPANGAP_SDCARD_PIN_D0=1
+  # The SX1262 inside the Wio-S3, on its own SPI bus (host 2). DIO2 drives the
+  # module's RF switch; DIO3 supplies the TCXO at 3.0 V (Meshtastic's current
+  # value for this board; older ports carry 1.8 V). No power gate.
+  - when: reticulous/iface-lora
+    set:
+      - CONFIG_LORA_COUNT=1
+      - CONFIG_LORA_SPI_HOST=2
+      - CONFIG_LORA_SCK_PIN=4
+      - CONFIG_LORA_MOSI_PIN=6
+      - CONFIG_LORA_MISO_PIN=5
+      - CONFIG_LORA0_CS_PIN=21
+      - CONFIG_LORA0_DIO1_PIN=9
+      - CONFIG_LORA0_BUSY_PIN=8
+      - CONFIG_LORA0_RST_PIN=7
+      - CONFIG_LORA0_TCXO_MV=3000
+      - CONFIG_LORA0_DIO2_RF_SWITCH=y
+      - CONFIG_LORA0_RADIO_SX1262=y
+  # L76K, NMEA over UART1 8N1. Host RX <- GPS TX = 18, host TX -> GPS RX = 17.
+  # Its supply is the expander's EXP_GNSS_PWR, switched through gpsBoardPower().
+  - when: spangap/gps
+    set:
+      - CONFIG_GPS_UART_NUM=1
+      - CONFIG_GPS_RX_PIN=18
+      - CONFIG_GPS_TX_PIN=17
+  # Display — NV3031B, native 240x320, on quad SPI (host 3, its own bus): SCK
+  # 42, D0..D3 = 41/40/39/38, CS 46, no D/C. Rotated 90° to the landscape the
+  # case is held in. The reset and the rail are expander lines (pulsed and
+  # raised by L2proBoard::onStart); the backlight is the LP5814, not a pin.
+  # Inversion off (the symbol defaults on): this glass shows complementary
+  # colours under INVON.
+  - when: spangap/spangap-lcd
+    set:
+      - CONFIG_LCD_SPI_HOST=3
+      - CONFIG_LCD_SPI_QUAD=y
+      - CONFIG_LCD_SCK_PIN=42
+      - CONFIG_LCD_MOSI_PIN=41
+      - CONFIG_LCD_MISO_PIN=40
+      - CONFIG_LCD_QSPI_D2_PIN=39
+      - CONFIG_LCD_QSPI_D3_PIN=38
+      - CONFIG_LCD_CS_PIN=46
+      - CONFIG_LCD_DC_PIN=-1
+      - CONFIG_LCD_RST_PIN=-1
+      - CONFIG_LCD_BL_PIN=-1
+      - CONFIG_LCD_PCLK_MHZ=40
+      - CONFIG_LCD_CONTROLLER_NV3031B=y
+      - CONFIG_LCD_NATIVE_WIDTH=240
+      - CONFIG_LCD_NATIVE_HEIGHT=320
+      - CONFIG_LCD_ROTATION_90=y
+      - CONFIG_LCD_INVERT_COLOR=n
+      - CONFIG_LCD_DRAW_STRIP_KB=8
+      # Touch — GT911 at 0x5D on the board I2C bus, which L2proBoard created
+      # and the controller adopts. Its reset and INT are expander lines, so no
+      # pins here and no interrupt: the controller is polled. The glass reads
+      # both axes reversed against the panel's native frame.
+      - CONFIG_LCD_TOUCH_CONTROLLER_GT911=y
+      - CONFIG_LCD_TOUCH_I2C_PORT=0
+      - CONFIG_LCD_TOUCH_I2C_ADOPT=y
+      - CONFIG_LCD_TOUCH_I2C_SDA=47
+      - CONFIG_LCD_TOUCH_I2C_SCL=48
+      - CONFIG_LCD_TOUCH_I2C_KHZ=100
+      - CONFIG_LCD_TOUCH_INT_PIN=-1
+      - CONFIG_LCD_TOUCH_RST_PIN=-1
+      - CONFIG_LCD_TOUCH_POLL_MS=50
+      - CONFIG_LCD_TOUCH_MIRROR_X=y
+      - CONFIG_LCD_TOUCH_MIRROR_Y=y
+      - CONFIG_LV_COLOR_DEPTH_16=y
+      - CONFIG_LV_USE_CUSTOM_MALLOC=y
+      - CONFIG_LV_USE_CLIB_STRING=y
+      - CONFIG_LV_FONT_MONTSERRAT_12=y
+  # Audio — ES8311 (speaker) and ES7243E (mic) share MCLK 10 / BCLK 11 /
+  # LRCK 12, so both directions run on one I2S controller (DUPLEX). Speaker data
+  # out on 16, mic data in on 15, in the right slot of 32-bit slots.
+  - when: spangap/audio
+    set:
+      - CONFIG_AUDIO_OUT_ENABLE=y
+      - CONFIG_AUDIO_IN_ENABLE=y
+      - CONFIG_AUDIO_IN_MODE_STD=y
+      - CONFIG_AUDIO_DUPLEX=y
+      - CONFIG_AUDIO_OUT_I2S_PORT=0
+      - CONFIG_AUDIO_OUT_MCLK_GPIO=10
+      - CONFIG_AUDIO_OUT_BCK_GPIO=11
+      - CONFIG_AUDIO_OUT_WS_GPIO=12
+      - CONFIG_AUDIO_OUT_DOUT_GPIO=16
+      - CONFIG_AUDIO_IN_DIN_GPIO=15
+      - CONFIG_AUDIO_IN_SLOT_RIGHT=y
+      - CONFIG_AUDIO_I2S_SLOT_BITS=32
+      - CONFIG_AUDIO_RATE_DEFAULT=16000
