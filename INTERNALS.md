@@ -52,8 +52,11 @@ PWM register writes from the lcd task through `lcdPanelSetBacklightDriver`.
 ## 3. Keys and standby
 
 `conditional/spangap-lcd/src/l2pro_lcd.cpp`. The U/B key (GPIO 0) is the
-TAP V2's Home state machine (hold 300 ms → standby, one click → home, two →
-recents, press in standby → wake, absorbed). The side key is expander line P0.0
+TAP V2's Home state machine (one click → home, two → recents, press in standby
+→ wake, absorbed) with the hold as the talk key: 300 ms down reports
+`LCD_KEY_PTT` down through `lcd_keys.h`, the release reports it up. A press in
+standby while a consumer has the talk key claimed is not absorbed: it wakes and
+keys on the same edge. The side key is expander line P0.0
 and reaches the chip as the expander's INT on GPIO 45, which falls on any input
 change and stays low until the input ports are read: an edge means "read the
 expander", and a fresh press toggles `sys.standby` (presses within 250 ms of the
@@ -62,8 +65,8 @@ last are bounce).
 In standby both GPIO 0 and GPIO 45 are LOW_LEVEL light-sleep wake sources. A
 level ISR fires for as long as its line is low, so each silences its own pin on
 first fire and the lcd task re-enables it after handling; `l2SleepWake` re-checks
-both lines on every GPIO wake in case a bounce hid the edge. The entry press
-must lift before GPIO 0 can be armed, so a `PM_NO_LIGHT_SLEEP` lock holds the CPU
+both lines on every GPIO wake in case a bounce hid the edge. A Home press still
+down when standby begins (it releases the talk key) must lift before GPIO 0 can be armed, so a `PM_NO_LIGHT_SLEEP` lock holds the CPU
 awake for just that window.
 
 ## 4. Audio

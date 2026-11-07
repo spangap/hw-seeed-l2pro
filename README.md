@@ -56,7 +56,9 @@ words); `l2pro i2c 14 <reg>` reads the codec live.
 ## Keys and standby
 
 The **U/B key** (GPIO 0, the BOOT strap) is Home: one click → launcher, two
-clicks → app switcher, hold 300 ms → standby, any press in standby → wake. The
+clicks → app switcher, hold 300 ms → push-to-talk (the talk key, held until
+release), any press in standby → wake (and keys at once when a call has
+claimed the talk key). The
 **side key** (expander line P0.0, reaching the chip as the expander's INT on
 GPIO 45) toggles standby. In standby both are light-sleep wake sources. Touch
 cannot wake the device: the GT911's INT is an expander line held low for its

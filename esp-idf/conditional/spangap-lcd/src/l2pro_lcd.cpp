@@ -13,10 +13,12 @@
  * (lcdPanelSetBacklightDriver).
  *
  * The Home button (GPIO 0, active-low):
- *   - hold 300 ms                -> standby (set sys.standby)
+ *   - hold 300 ms                -> the talk key (LCD_KEY_PTT) down until release
  *   - one click                  -> the launcher (lcdGoHome)
  *   - two clicks                 -> the running-app switcher (lcdShowRecents)
  *   - any press while in standby -> wake (clear sys.standby), fully absorbed
+ *                                   unless the talk key is claimed, then it
+ *                                   is a fresh press
  *
  * The side key (expander line EXP_WAKE_KEY): each press toggles standby. It
  * reaches us as the expander's INT on GPIO 45, which falls on any input change
@@ -32,6 +34,7 @@
 #include "freertos/task.h"
 
 #include "lcd_input.h"
+#include "lcd_keys.h"
 #include "lcd_panel.h"
 #include "lcd.h"
 #include "storage.h"
@@ -90,15 +93,16 @@ static void l2InputInit(void);
 static bool l2ClickRead(void);
 static void l2Standby(bool on);
 
-static constexpr uint32_t kStandbyHoldMs = 300;   /* hold this long and the screen goes off */
+static constexpr uint32_t kHoldMs        = 300;   /* hold this long and it is the talk key */
 static constexpr uint32_t kMulticlickMs  = 250;   /* a further click has to land within this */
 static constexpr int64_t  kSideRepeatUs  = 250 * 1000;   /* side-key presses closer than this are bounce */
 
-static lv_timer_t*    s_standbyTimer = nullptr;
+static lv_timer_t*    s_holdTimer    = nullptr;
 static lv_timer_t*    s_clickTimer   = nullptr;
 static int            s_clicks       = 0;
 static bool           s_btnHeld      = false;
 static bool           s_btnConsumed  = false;
+static bool           s_pttDown      = false;     /* this press reported LCD_KEY_PTT down */
 static bool           s_wakeAbsorb   = false;
 static volatile bool  s_standby      = false;     /* mirror of sys.standby (set on the lcd task) */
 
@@ -109,9 +113,9 @@ static int64_t        s_sideLastUs   = 0;
 /* Standby wake: both keys become light-sleep wake sources at LOW_LEVEL (edges
  * are invisible while the GPIO clock is gated). A level ISR re-fires for as
  * long as the line is low, so each silences its pin on first fire and the lcd
- * task re-enables it after handling. Standby is usually entered by a Home press
- * that is still down, and GPIO 0 can only be armed once it lifts:
- * s_standbyLock holds light sleep off for that window. */
+ * task re-enables it after handling. Standby can be entered with a Home press
+ * still down, and GPIO 0 can only be armed once it lifts: s_standbyLock holds
+ * light sleep off for that window. */
 static pm_lock_handle_t s_standbyLock = nullptr;
 static bool             s_wakeArmed   = false;
 static volatile bool    s_wakePending = false;   /* a Home press woke us, even if since lifted */
@@ -207,8 +211,20 @@ static void sidePoll(void) {
     s_sideDown = down;
 }
 
-static void cancelStandbyTimer(void) {
-    if (s_standbyTimer) { lv_timer_delete(s_standbyTimer); s_standbyTimer = nullptr; }
+static void cancelHoldTimer(void) {
+    if (s_holdTimer) { lv_timer_delete(s_holdTimer); s_holdTimer = nullptr; }
+}
+
+static void pttDown(void) {
+    s_btnConsumed = true;
+    s_pttDown     = true;
+    lcdKeyReport(LCD_KEY_PTT, true);
+}
+
+static void pttUp(void) {
+    if (!s_pttDown) return;
+    s_pttDown = false;
+    lcdKeyReport(LCD_KEY_PTT, false);
 }
 
 static void cancelClickBurst(void) {
@@ -229,13 +245,10 @@ static void armClickWindow(void) {
     lv_timer_set_repeat_count(s_clickTimer, 1);
 }
 
-static void btnStandbyCb(lv_timer_t*) {
-    s_standbyTimer = nullptr;
-    s_btnConsumed  = true;
-    s_btnHeld      = false;
-    s_wakeAbsorb   = true;
+static void btnHoldCb(lv_timer_t*) {
+    s_holdTimer = nullptr;
     cancelClickBurst();
-    storageSet("sys.standby", 1);
+    pttDown();
 }
 
 /* lcd_input.h click_read (lcd task). Never asserts a click: there is no
@@ -253,6 +266,10 @@ static bool l2ClickRead(void) {
         return false;
     }
     if (s_standby) {
+        if (s_pttDown) {
+            if (!down) { pttUp(); s_btnHeld = false; }
+            return false;
+        }
         if (!s_wakeArmed) {
             if (!down) l2WakeArm();
             return false;
@@ -260,7 +277,8 @@ static bool l2ClickRead(void) {
         if (down || s_wakePending) {
             s_wakePending = false;
             storageSet("sys.standby", 0);
-            if (down) s_wakeAbsorb = true;
+            if (down && lcdKeyClaimed(LCD_KEY_PTT)) { s_btnHeld = true; pttDown(); }
+            else if (down) s_wakeAbsorb = true;
         }
         else gpio_intr_enable((gpio_num_t)BOARD_HOME_BTN_PIN);
         return false;
@@ -271,13 +289,14 @@ static bool l2ClickRead(void) {
             s_btnHeld     = true;
             s_btnConsumed = false;
             if (s_clickTimer) { lv_timer_delete(s_clickTimer); s_clickTimer = nullptr; }
-            s_standbyTimer = lv_timer_create(btnStandbyCb, kStandbyHoldMs, nullptr);
-            lv_timer_set_repeat_count(s_standbyTimer, 1);
+            s_holdTimer = lv_timer_create(btnHoldCb, kHoldMs, nullptr);
+            lv_timer_set_repeat_count(s_holdTimer, 1);
         }
         return false;
     }
 
-    cancelStandbyTimer();
+    cancelHoldTimer();
+    pttUp();
     bool released = (s_btnHeld && !s_btnConsumed);
     s_btnHeld = false;
     if (!released) return false;
@@ -291,6 +310,8 @@ static bool l2ClickRead(void) {
  * service are up. */
 static void l2InputInit(void) {
     l2KeysInit();
+    lcdKeySetLabel(LCD_KEY_PTT, "U/B");
+    lcdKeyDeclare(LCD_KEY_PTT);
     storageSubscribeChanges("sys.standby", ON_CHANGE { l2Standby(atoi(val) != 0); });
 }
 
@@ -301,6 +322,9 @@ static void l2Standby(bool on) {
     s_standby = on;
     if (on) {
         cancelClickBurst();
+        cancelHoldTimer();
+        pttUp();
+        s_btnHeld = false;
         lcdScreenSleep();
         if (!s_standbyLock) pmLockCreate(PM_NO_LIGHT_SLEEP, "standby", &s_standbyLock);
         pmLockAcquire(s_standbyLock);
