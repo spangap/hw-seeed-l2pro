@@ -60,9 +60,11 @@ clicks → app switcher, hold 300 ms → push-to-talk (the talk key, held until
 release), any press in standby → wake (and keys at once when a call has
 claimed the talk key). The
 **side key** (expander line P0.0, reaching the chip as the expander's INT on
-GPIO 45) toggles standby. In standby both are light-sleep wake sources. Touch
-cannot wake the device: the GT911's INT is an expander line held low for its
-address select, so touch is polled.
+GPIO 45) toggles standby. In standby both are light-sleep wake sources. The
+GT911's INT is an expander line held low for its address select, so touch is
+polled, and it wakes the device only where `s.lcd.wake_on_touch` is set (off by
+default); otherwise the glass goes unread in standby and a touch made there is
+discarded on wake.
 
 ## Hardware & pin map
 
