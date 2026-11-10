@@ -19,6 +19,8 @@
  *   - any press while in standby -> wake (clear sys.standby), fully absorbed
  *                                   unless the talk key is claimed, then it
  *                                   is a fresh press
+ * Awake, the key bounces: each edge restarts a settle timer and the state
+ * machine acts on the level only once it has held still for kSettleMs.
  *
  * The side key (expander line EXP_WAKE_KEY): each press toggles standby. It
  * reaches us as the expander's INT on GPIO 45, which falls on any input change
@@ -92,11 +94,14 @@ static void lpInit(void) {
 static void l2InputInit(void);
 static bool l2ClickRead(void);
 static void l2Standby(bool on);
+static void btnSettledCb(lv_timer_t*);
 
 static constexpr uint32_t kHoldMs        = 300;   /* hold this long and it is the talk key */
 static constexpr uint32_t kMulticlickMs  = 250;   /* a further click has to land within this */
+static constexpr uint32_t kSettleMs      = 20;    /* the key's level has to hold this long to count */
 static constexpr int64_t  kSideRepeatUs  = 250 * 1000;   /* side-key presses closer than this are bounce */
 
+static lv_timer_t*    s_settleTimer  = nullptr;
 static lv_timer_t*    s_holdTimer    = nullptr;
 static lv_timer_t*    s_clickTimer   = nullptr;
 static int            s_clicks       = 0;
@@ -284,6 +289,19 @@ static bool l2ClickRead(void) {
         return false;
     }
 
+    if (s_settleTimer) lv_timer_reset(s_settleTimer);
+    else {
+        s_settleTimer = lv_timer_create(btnSettledCb, kSettleMs, nullptr);
+        lv_timer_set_repeat_count(s_settleTimer, 1);
+    }
+    return false;
+}
+
+static void btnSettledCb(lv_timer_t*) {
+    s_settleTimer = nullptr;
+    if (s_standby || s_wakeAbsorb) return;
+    bool down = gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) == 0;
+
     if (down) {
         if (!s_btnHeld) {
             s_btnHeld     = true;
@@ -292,18 +310,17 @@ static bool l2ClickRead(void) {
             s_holdTimer = lv_timer_create(btnHoldCb, kHoldMs, nullptr);
             lv_timer_set_repeat_count(s_holdTimer, 1);
         }
-        return false;
+        return;
     }
 
     cancelHoldTimer();
     pttUp();
     bool released = (s_btnHeld && !s_btnConsumed);
     s_btnHeld = false;
-    if (!released) return false;
+    if (!released) return;
 
-    if (++s_clicks >= 2) { s_clicks = 0; cancelClickBurst(); lcdShowRecents(); return false; }
+    if (++s_clicks >= 2) { cancelClickBurst(); lcdShowRecents(); return; }
     armClickWindow();
-    return false;
 }
 
 /* lcd_input.h init hook — lcd task, once the panel and the shared GPIO ISR
@@ -323,6 +340,7 @@ static void l2Standby(bool on) {
     if (on) {
         cancelClickBurst();
         cancelHoldTimer();
+        if (s_settleTimer) { lv_timer_delete(s_settleTimer); s_settleTimer = nullptr; }
         pttUp();
         s_btnHeld = false;
         lcdScreenSleep();

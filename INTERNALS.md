@@ -56,7 +56,10 @@ TAP V2's Home state machine (one click → home, two → recents, press in stand
 → wake, absorbed) with the hold as the talk key: 300 ms down reports
 `LCD_KEY_PTT` down through `lcd_keys.h`, the release reports it up. A press in
 standby while a consumer has the talk key claimed is not absorbed: it wakes and
-keys on the same edge. The side key is expander line P0.0
+keys on the same edge. GPIO 0 bounces, and read raw each bounce is a click of
+its own, so one press lands as two (the switcher). Awake, every edge only
+restarts a 20 ms settle timer, and the state machine runs on the level once it
+has held that long. The standby wake reads the line at once. The side key is expander line P0.0
 and reaches the chip as the expander's INT on GPIO 45, which falls on any input
 change and stays low until the input ports are read: an edge means "read the
 expander", and a fresh press toggles `sys.standby` (presses within 250 ms of the
